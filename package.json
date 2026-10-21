@@ -1,0 +1,26 @@
+{
+  "name": "@06line/sdk",
+  "version": "0.0.0",
+  "description": "06 Line in the browser: place and answer calls on your lines over WebRTC.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "repository": { "type": "git", "url": "git+https://github.com/06line/sdk-browser.git" },
+  "homepage": "https://docs.06line.com/docs/softphone",
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
