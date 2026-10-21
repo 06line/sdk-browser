@@ -1,5 +1,5 @@
 {
-  "name": "@06line/sdk",
+  "name": "@06line/sdk-browser",
   "version": "0.0.0",
   "description": "06 Line in the browser: place and answer calls on your lines over WebRTC.",
   "license": "MIT",

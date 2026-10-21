@@ -1,4 +1,4 @@
-# @06line/sdk
+# @06line/sdk-browser
 
 06 Line in the browser: place and answer calls on your 06 Line lines, with the microphone and speaker of your choice,
 over WebRTC. It handles the plumbing (ephemeral key, session, audio devices, volumes) so a softphone is a few lines
@@ -8,7 +8,7 @@ of code.
 release, follow the [calls guide](https://docs.06line.com/docs/calls) to use the API directly.
 
 ```sh
-npm install @06line/sdk
+npm install @06line/sdk-browser
 ```
 
 SMS are not part of the SDK: send them from your server with the REST API.
