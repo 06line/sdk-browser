@@ -13,7 +13,7 @@
   "files": ["dist"],
   "sideEffects": false,
   "repository": { "type": "git", "url": "git+https://github.com/06line/sdk-browser.git" },
-  "homepage": "https://docs.06line.com/docs/softphone",
+  "homepage": "https://docs.06line.com/docs/call-with-sdk",
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
   "scripts": {
     "build": "tsc -p tsconfig.json",

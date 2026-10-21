@@ -4,8 +4,10 @@
 over WebRTC. It handles the plumbing (ephemeral key, session, audio devices, volumes) so a softphone is a few lines
 of code.
 
-**Status: in development.** For now the package only exports the types of the session events. Until the first
-release, follow the [calls guide](https://docs.06line.com/docs/calls) to use the API directly.
+Guide: [Call with the SDK](https://docs.06line.com/docs/call-with-sdk). Reference:
+[docs.06line.com/docs/reference/sdk](https://docs.06line.com/docs/reference/sdk). A complete example:
+[06line/example-softphone](https://github.com/06line/example-softphone). Without the SDK, from any platform:
+[Call with the API](https://docs.06line.com/docs/call-with-api).
 
 ```sh
 npm install @06line/sdk-browser
