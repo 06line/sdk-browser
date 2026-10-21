@@ -17,11 +17,18 @@ export class PhoneError extends Error {
 export const browserErrors = {
   microphoneDenied: () => new PhoneError("microphone_denied", "microphone access was refused"),
   microphoneNotFound: () => new PhoneError("microphone_not_found", "no microphone, or the chosen one is unplugged"),
+  speakerNotFound: () => new PhoneError("speaker_not_found", "the chosen speaker is unplugged or not allowed"),
   audioUnavailable: () => new PhoneError("audio_unavailable", "this page cannot use Web Audio (serve it over HTTPS)"),
   userGestureRequired: () =>
-    new PhoneError("user_gesture_required", "call() and answer() must run from a user action, such as a click"),
+    new PhoneError("user_gesture_required", "call(), answer() and testMicrophone() must run from a user action, such as a click"),
   notSupported: () => new PhoneError("not_supported", "this browser cannot choose the speaker"),
+  notConnected: () => new PhoneError("line_offline", "the phone is not connected: wait for the connected state"),
   ephemeralKeyFailed: (cause: unknown) =>
     new PhoneError("ephemeral_key_failed", `getEphemeralKey failed: ${String(cause)}`),
   connectionLost: () => new PhoneError("connection_lost", "the WebRTC session could not be restored for 2 minutes"),
+}
+
+/** toPhoneError keeps a PhoneError, and wraps anything else as internal. */
+export function toPhoneError(error: unknown): PhoneError {
+  return error instanceof PhoneError ? error : new PhoneError("internal", String(error))
 }

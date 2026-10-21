@@ -1,5 +1,6 @@
 import { Emitter } from "./emitter.js"
-import type { Sound } from "./sound.js"
+import { toPhoneError } from "./errors.js"
+import { clamp, type Sound } from "./sound.js"
 import type { ApiCall, AudioOptions, CallState, EndReason } from "./types.js"
 
 type CallEvents = {
@@ -8,10 +9,24 @@ type CallEvents = {
   level: (levels: { input: number; output: number }) => void
 }
 
-// What a call needs from its phone: the REST routes, with the session of the phone.
+/**
+ * What a call needs from its phone: the REST routes, with the session of the phone.
+ * @internal
+ */
 export type CallHost = {
   answer(call: Call, options: AudioOptions): Promise<void>
   hangup(call: Call): Promise<void>
+}
+
+/**
+ * The audio a call runs with, once the phone has opened it.
+ * @internal
+ */
+export type CallAudio = {
+  input: string | MediaStream
+  output: string | null
+  inputVolume: number
+  outputVolume: number
 }
 
 /** One call: its state from the API, its controls, and its audio settings, which can change while it runs. */
@@ -33,7 +48,10 @@ export class Call extends Emitter<CallEvents> {
   outputVolume = 1
 
   private levelTimer?: ReturnType<typeof setInterval>
+  // Whether the sound of the phone is this call's: only then does its end release the microphone.
+  private hasAudio = false
 
+  /** @internal */
   constructor(
     data: ApiCall,
     private readonly host: CallHost,
@@ -64,39 +82,77 @@ export class Call extends Emitter<CallEvents> {
   }
 
   async setInput(device: string | MediaStream) {
-    await this.sound.setInput(device)
+    try {
+      await this.sound.setInput(device)
+    } catch (error) {
+      throw toPhoneError(error)
+    }
+
     this.input = device
   }
 
   async setOutput(deviceId: string) {
-    await this.sound.setOutput(deviceId)
+    try {
+      await this.sound.setOutput(deviceId)
+    } catch (error) {
+      throw toPhoneError(error)
+    }
+
     this.output = deviceId
   }
 
   setInputVolume(volume: number) {
-    this.inputVolume = volume
+    this.inputVolume = clamp(volume)
     this.sound.setInputVolume(volume)
   }
 
   setOutputVolume(volume: number) {
-    this.outputVolume = volume
+    this.outputVolume = clamp(volume)
     this.sound.setOutputVolume(volume)
   }
 
-  /** Applies the audio options of call() or answer(); the phone calls it before the call starts. */
-  async configure(options: AudioOptions) {
-    if (options.output !== undefined) await this.setOutput(options.output)
-    await this.setInput(options.input ?? "default")
-    this.setInputVolume(options.inputVolume ?? 1)
-    this.setOutputVolume(options.outputVolume ?? 1)
-    this.mute(false)
+  /**
+   * Takes the audio the phone opened for this call, before it starts.
+   * @internal
+   */
+  attach(audio: CallAudio) {
+    if (this.endReason) return
 
+    this.hasAudio = true
+    this.input = audio.input
+    this.output = audio.output
+    this.inputVolume = audio.inputVolume
+    this.outputVolume = audio.outputVolume
+    this.muted = false
     this.levelTimer ??= setInterval(() => this.emit("level", this.sound.levels()), 50)
   }
 
-  /** Takes the state the API reports. */
+  /**
+   * Gives the sound back when answering failed: the call goes on ringing, or has ended.
+   * @internal
+   */
+  detach() {
+    if (!this.hasAudio) return
+
+    this.hasAudio = false
+    clearInterval(this.levelTimer)
+    this.levelTimer = undefined
+    this.sound.releaseInput()
+  }
+
+  /**
+   * Takes the state the API reports.
+   * @internal
+   */
   update(data: ApiCall) {
-    if (this.state === "ended") return
+    if (this.endReason) return
+
+    // Every session rings; when another one answers, the call is over for this phone.
+    if (this.direction === "inbound" && data.state === "active" && !this.hasAudio) {
+      this.end("answered_elsewhere")
+
+      return
+    }
 
     if (data.answered_at) this.answeredAt = new Date(data.answered_at)
 
@@ -108,7 +164,10 @@ export class Call extends Emitter<CallEvents> {
     if (data.state === "ended") this.end(data.end_reason ?? "hangup")
   }
 
-  /** Ends the call here, once, and releases the microphone. */
+  /**
+   * Ends the call here, once: the state event, then the microphone is released, then the ended event.
+   * @internal
+   */
   end(reason: EndReason) {
     if (this.endReason) return
 
@@ -119,7 +178,7 @@ export class Call extends Emitter<CallEvents> {
 
     this.endReason = reason
     clearInterval(this.levelTimer)
-    this.sound.releaseInput()
+    if (this.hasAudio) this.sound.releaseInput()
     this.emit("ended", reason)
   }
 }

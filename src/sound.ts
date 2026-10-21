@@ -86,7 +86,7 @@ export class Sound {
     if (deviceId === undefined) return
     if (!this.canChooseOutput || !this.speaker) throw browserErrors.notSupported()
 
-    await (this.speaker as HTMLAudioElement & { setSinkId(id: string): Promise<void> }).setSinkId(deviceId)
+    await sink(this.speaker, deviceId)
   }
 
   setOutputVolume(volume: number) {
@@ -97,8 +97,21 @@ export class Sound {
   async start() {
     const { ctx } = this.graph()
 
-    await ctx.resume()
-    await this.speaker?.play()
+    try {
+      await ctx.resume()
+      await this.speaker?.play()
+    } catch (error) {
+      throw playError(error)
+    }
+  }
+
+  /** Opens the audio of a call: speaker, microphone, volumes, unmuted. */
+  async open(audio: { input: string | MediaStream; output?: string; inputVolume: number; outputVolume: number }) {
+    await this.setOutput(audio.output)
+    await this.setInput(audio.input)
+    this.setInputVolume(audio.inputVolume)
+    this.setOutputVolume(audio.outputVolume)
+    this.mute(false)
   }
 
   /** Peak levels, 0 to 1, of what is sent and what is heard. */
@@ -109,38 +122,48 @@ export class Sound {
   }
 
   /** Plays a microphone back 0.5 s later through the same gain and limiter as a call. */
-  async test(options: { input?: string | MediaStream; output?: string; inputVolume?: number; outputVolume?: number }) {
+  async test(options: { input: string | MediaStream; output?: string; inputVolume: number; outputVolume: number }) {
     const ctx = this.graph().ctx
     const stream = options.input instanceof MediaStream ? options.input : await microphone(options.input)
     const element = document.createElement("audio")
     const destination = ctx.createMediaStreamDestination()
 
     const gain = ctx.createGain()
-    gain.gain.value = clamp(options.inputVolume ?? 1)
+    gain.gain.value = clamp(options.inputVolume)
     const delay = ctx.createDelay(1)
     delay.delayTime.value = 0.5
     const volume = ctx.createGain()
-    volume.gain.value = clamp(options.outputVolume ?? 1)
+    volume.gain.value = clamp(options.outputVolume)
 
     const source = ctx.createMediaStreamSource(stream)
     source.connect(gain).connect(limiter(ctx)).connect(delay).connect(volume).connect(destination)
     element.srcObject = destination.stream
 
-    if (options.output !== undefined) {
-      if (!this.canChooseOutput) throw browserErrors.notSupported()
-      await (element as HTMLAudioElement & { setSinkId(id: string): Promise<void> }).setSinkId(options.output)
+    const stop = () => {
+      element.pause()
+      source.disconnect()
+      if (!(options.input instanceof MediaStream)) stream.getTracks().forEach((track) => track.stop())
     }
 
-    await ctx.resume()
-    await element.play()
+    try {
+      if (options.output !== undefined) {
+        if (!this.canChooseOutput) throw browserErrors.notSupported()
+        await sink(element, options.output)
+      }
 
-    return {
-      stop: () => {
-        element.pause()
-        source.disconnect()
-        if (!(options.input instanceof MediaStream)) stream.getTracks().forEach((track) => track.stop())
-      },
+      try {
+        await ctx.resume()
+        await element.play()
+      } catch (error) {
+        throw playError(error)
+      }
+    } catch (error) {
+      // The microphone is already open: close it, or the browser keeps showing it in use.
+      stop()
+      throw error
     }
+
+    return { stop }
   }
 
   private graph() {
@@ -189,6 +212,26 @@ function limiter(ctx: AudioContext): DynamicsCompressorNode {
   return node
 }
 
+// sink sends an element to a speaker, with the speaker errors as PhoneError.
+async function sink(element: HTMLAudioElement, deviceId: string) {
+  try {
+    await (element as HTMLAudioElement & { setSinkId(id: string): Promise<void> }).setSinkId(deviceId)
+  } catch (error) {
+    const name = (error as DOMException).name
+    if (name === "NotFoundError" || name === "NotAllowedError" || name === "AbortError") throw browserErrors.speakerNotFound()
+
+    throw new PhoneError("speaker_not_found", String(error))
+  }
+}
+
+// playError tells a sound the browser blocked for lack of a user action from any other failure.
+function playError(error: unknown): PhoneError {
+  if (error instanceof PhoneError) return error
+  if ((error as DOMException)?.name === "NotAllowedError") return browserErrors.userGestureRequired()
+
+  return new PhoneError("audio_unavailable", String(error))
+}
+
 async function microphone(deviceId: string | undefined): Promise<MediaStream> {
   if (!navigator.mediaDevices?.getUserMedia) throw browserErrors.audioUnavailable()
 
@@ -221,6 +264,7 @@ function peak(meter: AnalyserNode): number {
   return Math.min(max, 1)
 }
 
-function clamp(volume: number): number {
-  return Math.max(0, Math.min(2, volume))
+/** clamp keeps a volume between 0 and 2; anything that is not a number is 1. */
+export function clamp(volume: number): number {
+  return Number.isFinite(volume) ? Math.max(0, Math.min(2, volume)) : 1
 }

@@ -1,8 +1,8 @@
 import { api } from "./api.js"
-import { Call, type CallHost } from "./call.js"
+import { Call, type CallAudio, type CallHost } from "./call.js"
 import { Emitter } from "./emitter.js"
-import { browserErrors, PhoneError } from "./errors.js"
-import { Sound } from "./sound.js"
+import { browserErrors, PhoneError, toPhoneError } from "./errors.js"
+import { clamp, Sound } from "./sound.js"
 import {
   type ApiCall,
   type AudioOptions,
@@ -27,23 +27,31 @@ const storageKey = "06line:audio"
 const refreshBefore = 60_000
 // A session that cannot be restored for this long is given up, with connection_lost.
 const giveUpAfter = 120_000
+// A session that answers its offer but never sends session.ready is a failed one.
+const readyWithin = 10_000
 
 /** Phone holds the WebRTC session of the page, its lines, and its calls, one at a time. */
-export class Phone extends Emitter<PhoneEvents> implements CallHost {
+export class Phone extends Emitter<PhoneEvents> {
   state: PhoneState = "closed"
   lines: Line[] = []
   calls: Call[] = []
 
   private readonly sound = new Sound()
   private readonly baseUrl: string
+  private readonly host: CallHost = {
+    answer: (call, options) => this.answerCall(call, options),
+    hangup: (call) => this.hangupCall(call),
+  }
   private key?: EphemeralKey
   private keyTimer?: ReturnType<typeof setTimeout>
   private pc?: RTCPeerConnection
   private sessionId?: string
   private lostSince?: number
   private retryTimer?: ReturnType<typeof setTimeout>
+  private opening?: Promise<void>
   private wanted = false
 
+  /** @internal */
   constructor(private readonly options: PhoneOptions) {
     super()
     this.baseUrl = (options.baseUrl ?? "https://api.06line.com").replace(/\/$/, "")
@@ -52,9 +60,17 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
       this.emit("error", browserErrors.microphoneNotFound())
     }
 
+    // Back online after a network loss: retry now rather than at the end of the wait.
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", () => {
+        if (this.wanted && this.state === "reconnecting") void this.open().catch(() => this.sessionLost())
+      })
+    }
+
     if (options.autoConnect ?? true) void this.connect().catch((error) => this.emit("error", toPhoneError(error)))
   }
 
+  /** Whether the browser can send the sound to a chosen speaker (it has HTMLMediaElement.setSinkId). */
   get canChooseOutput(): boolean {
     return this.sound.canChooseOutput
   }
@@ -62,13 +78,11 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
   /** Opens the WebRTC session, and keeps it open until disconnect(). */
   async connect(): Promise<void> {
     this.wanted = true
-    if (this.state === "connected" || this.state === "connecting") return
-
-    this.setState(this.lostSince === undefined ? "connecting" : "reconnecting")
+    if (this.state === "connected") return
+    if (this.state === "closed") this.setState("connecting")
 
     try {
-      await this.refreshKey()
-      await this.openSession()
+      await this.open()
     } catch (error) {
       this.sessionLost()
       throw toPhoneError(error)
@@ -78,11 +92,13 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
   /** Closes the session; the call in progress is hung up. */
   async disconnect(): Promise<void> {
     this.wanted = false
+    this.lostSince = undefined
     clearTimeout(this.keyTimer)
     clearTimeout(this.retryTimer)
 
     const call = this.current()
-    if (call) await this.hangup(call).catch(() => {})
+    if (call) await this.hangupCall(call).catch(() => {})
+    this.endAll("hangup")
 
     const id = this.sessionId
     this.closeSession()
@@ -93,7 +109,14 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
   }
 
   async devices(): Promise<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }> {
-    const devices = await navigator.mediaDevices.enumerateDevices()
+    if (!navigator.mediaDevices?.enumerateDevices) throw browserErrors.audioUnavailable()
+
+    let devices: MediaDeviceInfo[]
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices()
+    } catch (error) {
+      throw toPhoneError(error)
+    }
 
     return {
       inputs: devices.filter((d) => d.kind === "audioinput"),
@@ -101,93 +124,154 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
     }
   }
 
-  testMicrophone(options: AudioOptions = {}): Promise<{ stop(): void }> {
-    return this.sound.test({ ...this.remembered(), ...options }).catch((error) => {
-      throw toPhoneError(error)
-    })
-  }
-
-  /** Places a call from a user action. Resolves as soon as the call exists, before it rings. */
-  async call(options: CallOptions): Promise<Call> {
+  /** Plays the microphone back half a second later; call it from a user action. */
+  async testMicrophone(options: AudioOptions = {}): Promise<{ stop(): void }> {
     requireGesture()
-    const lineId = options.lineId ?? (this.lines.length === 1 ? this.lines[0].id : undefined)
-    if (!lineId) throw new PhoneError("invalid_request", "lineId is required when the phone has several lines", { param: "lineId" })
-
-    const audio = { ...this.remembered(), ...options }
-    await this.prepareAudio()
-
-    const data = await this.request<ApiCall>("/v1/calls", {
-      line_id: lineId,
-      to: options.to,
-      session_id: await this.session(),
-      client_ref: options.clientRef,
-    })
-
-    const call = this.track(data)
-    await this.applyAudio(call, audio)
-
-    return call
-  }
-
-  // CallHost
-
-  async answer(call: Call, options: AudioOptions): Promise<void> {
-    requireGesture()
-    const audio = { ...this.remembered(), ...options }
-    await this.prepareAudio()
-    await this.applyAudio(call, audio)
 
     try {
-      const data = await this.request<ApiCall>(`/v1/calls/${call.id}/answer`, { session_id: await this.session() })
-      call.update(data)
+      return await this.withDevices(options, (audio) => this.sound.test(audio))
+    } catch (error) {
+      throw toPhoneError(error)
+    }
+  }
+
+  /**
+   * Places a call from a user action. The microphone opens first: if it fails, no call is placed. Resolves as soon as
+   * the call exists, before it rings.
+   */
+  async call(options: CallOptions): Promise<Call> {
+    requireGesture()
+    const sessionId = this.session()
+    const lineId = this.lineFor(options.lineId)
+
+    await this.prepareAudio()
+    const audio = await this.openAudio(options)
+
+    let data: ApiCall
+    try {
+      data = await this.request<ApiCall>("/v1/calls", {
+        line_id: lineId,
+        to: options.to,
+        session_id: sessionId,
+        client_ref: options.clientRef,
+      })
     } catch (error) {
       this.sound.releaseInput()
       throw error
     }
+
+    return this.track(data, audio)
   }
 
-  async hangup(call: Call): Promise<void> {
-    const data = await this.request<ApiCall>(`/v1/calls/${call.id}/hangup`, {})
-    call.update(data)
+  // The CallHost of the calls.
+
+  private async answerCall(call: Call, options: AudioOptions): Promise<void> {
+    requireGesture()
+    const sessionId = this.session()
+
+    await this.prepareAudio()
+    const audio = await this.openAudio(options)
+    call.attach(audio)
+    this.remember(call)
+
+    try {
+      // The answer resolves with the call still ringing; call.state turns it active.
+      call.update(await this.request<ApiCall>(`/v1/calls/${call.id}/answer`, { session_id: sessionId }))
+    } catch (error) {
+      call.detach()
+      throw error
+    }
   }
+
+  private async hangupCall(call: Call): Promise<void> {
+    call.update(await this.request<ApiCall>(`/v1/calls/${call.id}/hangup`, {}))
+  }
+
+  // Audio.
 
   private async prepareAudio() {
     try {
       await this.sound.start()
-    } catch {
-      throw browserErrors.userGestureRequired()
+    } catch (error) {
+      throw toPhoneError(error)
     }
   }
 
-  private async applyAudio(call: Call, audio: AudioOptions) {
-    try {
-      await call.configure(audio)
-    } catch (error) {
-      await this.hangup(call).catch(() => {})
-      throw toPhoneError(error)
+  /** Opens the microphone and the speaker of a call, and says what it runs with. */
+  private openAudio(options: AudioOptions): Promise<CallAudio> {
+    return this.withDevices(options, async (audio) => {
+      await this.sound.open(audio)
+
+      return {
+        input: audio.input,
+        output: this.canChooseOutput ? (audio.output ?? "default") : null,
+        inputVolume: audio.inputVolume,
+        outputVolume: audio.outputVolume,
+      }
+    })
+  }
+
+  /**
+   * Runs with the given devices, else the remembered ones, else the system defaults. A remembered device that is gone
+   * is forgotten, and the defaults are used instead.
+   */
+  private async withDevices<T>(
+    options: AudioOptions,
+    run: (audio: { input: string | MediaStream; output?: string; inputVolume: number; outputVolume: number }) => Promise<T>
+  ): Promise<T> {
+    const remembered = this.remembered()
+    const audio = (devices: AudioOptions) => {
+      const merged = { ...devices, ...options }
+
+      return {
+        input: merged.input ?? "default",
+        output: this.canChooseOutput ? merged.output : undefined,
+        inputVolume: clamp(merged.inputVolume ?? 1),
+        outputVolume: clamp(merged.outputVolume ?? 1),
+      }
     }
 
-    this.remember(call)
+    try {
+      return await run(audio(remembered))
+    } catch (error) {
+      const code = error instanceof PhoneError ? error.code : ""
+      const staleInput = code === "microphone_not_found" && options.input === undefined && remembered.input !== undefined
+      const staleOutput = code === "speaker_not_found" && options.output === undefined && remembered.output !== undefined
+      if (!staleInput && !staleOutput) throw error
+
+      this.forgetDevices()
+
+      return run(audio({ inputVolume: remembered.inputVolume, outputVolume: remembered.outputVolume }))
+    }
   }
 
   private current(): Call | undefined {
     return this.calls.find((call) => call.state !== "ended")
   }
 
-  /** The Call of the API object, created the first time it is seen. */
-  private track(data: ApiCall): Call {
+  /** The Call of the API object, created the first time it is seen; audio is what call() opened for it. */
+  private track(data: ApiCall, audio?: CallAudio): Call {
     let call = this.calls.find((c) => c.id === data.id)
     if (!call) {
-      call = new Call(data, this, this.sound)
-      this.calls.push(call)
-      call.on("ended", () => {
-        this.calls = this.calls.filter((c) => c !== call)
+      const created = new Call(data, this.host, this.sound)
+      created.on("ended", () => {
+        this.calls = this.calls.filter((c) => c !== created)
       })
+      this.calls.push(created)
+      call = created
     }
 
+    if (audio) {
+      call.attach(audio)
+      this.remember(call)
+    }
     call.update(data)
 
     return call
+  }
+
+  private endAll(reason: "hangup" | "line_offline") {
+    for (const call of [...this.calls]) call.end(reason)
   }
 
   private onEvent(event: SessionEvent) {
@@ -207,20 +291,49 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
         if (!this.calls.some((c) => c.id === event.data.id)) this.emit("incoming", this.track(event.data))
         break
       case "call.state":
-        this.track(event.data)
+        // Only calls this phone knows: a call another session took ends here as answered_elsewhere.
+        if (this.calls.some((c) => c.id === event.data.id)) this.track(event.data)
         break
     }
   }
 
   // The WebRTC session.
 
-  private async session(): Promise<string> {
-    if (this.state !== "connected" || !this.sessionId) throw new PhoneError("line_offline", "the phone is not connected")
+  private session(): string {
+    if (this.state !== "connected" || !this.sessionId) throw browserErrors.notConnected()
 
     return this.sessionId
   }
 
+  private lineFor(lineId: string | undefined): string {
+    if (lineId) return lineId
+    if (this.lines.length === 1) return this.lines[0].id
+
+    throw new PhoneError(
+      "invalid_request",
+      this.lines.length === 0 ? "this phone has no line: its ephemeral key gives access to none" : "lineId is required: this phone has several lines",
+      { param: "lineId" }
+    )
+  }
+
+  /** Opens a session, once at a time: connect(), the retry timer and the online event share it. */
+  private open(): Promise<void> {
+    clearTimeout(this.retryTimer)
+    this.opening ??= (async () => {
+      try {
+        await this.refreshKey()
+        await this.openSession()
+      } finally {
+        this.opening = undefined
+      }
+    })()
+
+    return this.opening
+  }
+
   private async openSession() {
+    this.closeSession()
+
     const key = this.key!
     const pc = new RTCPeerConnection({ iceServers: key.ice_servers })
     this.pc = pc
@@ -229,18 +342,26 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
     pc.ontrack = (event) => this.sound.setRemote(event.streams[0] ?? new MediaStream([event.track]))
 
     const channel = pc.createDataChannel("06line")
-    const ready = new Promise<void>((resolve) => {
+    const ready = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new PhoneError("internal", "the session never became ready")), readyWithin)
       channel.onmessage = (message) => {
         const event = JSON.parse(message.data) as SessionEvent
         this.onEvent(event)
-        if (event.type === "session.ready") resolve()
+        if (event.type === "session.ready") {
+          clearTimeout(timer)
+          resolve()
+        }
       }
     })
 
-    pc.onconnectionstatechange = () => {
-      if (pc !== this.pc) return
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") this.sessionLost()
+    // ICE failed, or the data channel closed: the session is gone, a new one opens.
+    const lost = () => {
+      if (pc === this.pc && this.state === "connected") this.sessionLost()
     }
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") lost()
+    }
+    channel.onclose = lost
 
     await pc.setLocalDescription(await pc.createOffer())
     await iceGathered(pc)
@@ -250,8 +371,24 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
     await pc.setRemoteDescription({ type: "answer", sdp: session.sdp })
     await ready
 
+    const reconnected = this.lostSince !== undefined
     this.lostSince = undefined
     this.setState("connected")
+    if (reconnected) await this.syncCalls()
+  }
+
+  /**
+   * After a new session: the API hung up the call of the lost one, and this phone missed its events. The calls take
+   * the state the API has now.
+   */
+  private async syncCalls() {
+    for (const call of [...this.calls]) {
+      try {
+        call.update(await this.request<ApiCall>(`/v1/calls/${call.id}`))
+      } catch {
+        call.end("line_offline")
+      }
+    }
   }
 
   private closeSession() {
@@ -261,16 +398,20 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
     pc?.close()
   }
 
-  /** The session died: its call is over; a new one opens with a growing wait, for up to 2 minutes. */
+  /**
+   * The session died. Its calls stay as they are until a new session tells their real state (the API hangs up a call
+   * whose session is lost); a new one opens with a growing wait, for up to 2 minutes, then the calls end line_offline.
+   */
   private sessionLost() {
     this.closeSession()
-    this.current()?.end("line_offline")
     if (!this.wanted) return
 
     this.lostSince ??= Date.now()
     if (Date.now() - this.lostSince > giveUpAfter) {
       this.wanted = false
       this.lostSince = undefined
+      clearTimeout(this.keyTimer)
+      this.endAll("line_offline")
       this.setState("closed")
       this.emit("error", browserErrors.connectionLost())
 
@@ -280,19 +421,7 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
     this.setState("reconnecting")
     clearTimeout(this.retryTimer)
     const elapsed = Date.now() - this.lostSince
-    this.retryTimer = setTimeout(() => {
-      this.state = "reconnecting"
-      void this.openSessionAgain()
-    }, Math.min(1000 + elapsed / 4, 10_000))
-  }
-
-  private async openSessionAgain() {
-    try {
-      await this.refreshKey()
-      await this.openSession()
-    } catch {
-      this.sessionLost()
-    }
+    this.retryTimer = setTimeout(() => void this.open().catch(() => this.sessionLost()), Math.min(1000 + elapsed / 4, 10_000))
   }
 
   // The ephemeral key.
@@ -309,10 +438,12 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
 
     clearTimeout(this.keyTimer)
     const wait = Math.max(new Date(this.key.expires_at).getTime() - Date.now() - refreshBefore, 5_000)
-    this.keyTimer = setTimeout(() => void this.refreshKey().catch((error) => this.emit("error", toPhoneError(error))), wait)
+    this.keyTimer = setTimeout(() => {
+      if (this.wanted) void this.refreshKey().catch((error) => this.emit("error", toPhoneError(error)))
+    }, wait)
   }
 
-  private request<T>(path: string, body: unknown): Promise<T> {
+  private request<T>(path: string, body?: unknown): Promise<T> {
     return api<T>(this.baseUrl, this.key!.ephemeral_key, path, body)
   }
 
@@ -338,10 +469,19 @@ export class Phone extends Emitter<PhoneEvents> implements CallHost {
   private remember(call: Call) {
     if (this.options.rememberDevices === false) return
 
+    const audio: AudioOptions = { inputVolume: call.inputVolume, outputVolume: call.outputVolume }
+    if (typeof call.input === "string") audio.input = call.input
+    if (call.output) audio.output = call.output
+    this.store(audio)
+  }
+
+  private forgetDevices() {
+    const { inputVolume, outputVolume } = this.remembered()
+    this.store({ inputVolume, outputVolume })
+  }
+
+  private store(audio: AudioOptions) {
     try {
-      const audio: AudioOptions = { inputVolume: call.inputVolume, outputVolume: call.outputVolume }
-      if (typeof call.input === "string") audio.input = call.input
-      if (call.output) audio.output = call.output
       localStorage.setItem(storageKey, JSON.stringify(audio))
     } catch {
       // Private browsing or blocked storage: the defaults stay.
@@ -369,8 +509,4 @@ function iceGathered(pc: RTCPeerConnection): Promise<void> {
 function requireGesture() {
   const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation
   if (activation && !activation.isActive) throw browserErrors.userGestureRequired()
-}
-
-function toPhoneError(error: unknown): PhoneError {
-  return error instanceof PhoneError ? error : new PhoneError("internal", String(error))
 }

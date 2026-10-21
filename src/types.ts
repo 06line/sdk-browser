@@ -6,7 +6,15 @@ export type PhoneState = "connecting" | "connected" | "reconnecting" | "closed"
 
 export type CallState = "dialing" | "ringing" | "active" | "ended"
 
-export type EndReason = "hangup" | "remote_hangup" | "no_answer" | "busy" | "line_offline" | "failed"
+// answered_elsewhere is the SDK's own: another session of the company answered the incoming call.
+export type EndReason =
+  | "hangup"
+  | "remote_hangup"
+  | "no_answer"
+  | "busy"
+  | "line_offline"
+  | "failed"
+  | "answered_elsewhere"
 
 export type Line = {
   id: string
@@ -29,7 +37,7 @@ export type EphemeralKey = {
 export type AudioOptions = {
   /** Microphone deviceId from phone.devices(), or your own MediaStream. */
   input?: string | MediaStream
-  /** Speaker deviceId from phone.devices(); not available in Safari. */
+  /** Speaker deviceId from phone.devices(); only where phone.canChooseOutput is true. */
   output?: string
   /** Microphone gain, 0 (silent) to 2 (+6 dB). */
   inputVolume?: number
