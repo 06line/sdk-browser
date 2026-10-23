@@ -10,12 +10,13 @@ type CallEvents = {
 }
 
 /**
- * What a call needs from its phone: the REST routes, with the session of the phone.
+ * What a call needs from its phone: the REST routes, with the session of the phone, and the memory of the devices.
  * @internal
  */
 export type CallHost = {
   answer(call: Call, options: AudioOptions): Promise<void>
   hangup(call: Call): Promise<void>
+  remember(call: Call): void
 }
 
 /**
@@ -89,6 +90,7 @@ export class Call extends Emitter<CallEvents> {
     }
 
     this.input = device
+    this.host.remember(this)
   }
 
   async setOutput(deviceId: string) {
@@ -99,16 +101,19 @@ export class Call extends Emitter<CallEvents> {
     }
 
     this.output = deviceId
+    this.host.remember(this)
   }
 
   setInputVolume(volume: number) {
     this.inputVolume = clamp(volume)
     this.sound.setInputVolume(volume)
+    this.host.remember(this)
   }
 
   setOutputVolume(volume: number) {
     this.outputVolume = clamp(volume)
     this.sound.setOutputVolume(volume)
+    this.host.remember(this)
   }
 
   /**

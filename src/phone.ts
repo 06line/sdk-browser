@@ -42,6 +42,7 @@ export class Phone extends Emitter<PhoneEvents> {
   private readonly host: CallHost = {
     answer: (call, options) => this.answerCall(call, options),
     hangup: (call) => this.hangupCall(call),
+    remember: (call) => this.remember(call),
   }
   private key?: EphemeralKey
   private keyTimer?: ReturnType<typeof setTimeout>
@@ -478,10 +479,18 @@ export class Phone extends Emitter<PhoneEvents> {
     }
   }
 
+  /**
+   * Keeps the devices and volumes of a call for the next ones, when it starts and on each change. A volume of 0 is a way
+   * to silence a call, not a level: the previous one stays, so the next call is not silent.
+   */
   private remember(call: Call) {
     if (this.options.rememberDevices === false) return
 
-    const audio: AudioOptions = { inputVolume: call.inputVolume, outputVolume: call.outputVolume }
+    const previous = this.remembered()
+    const audio: AudioOptions = {
+      inputVolume: call.inputVolume || previous.inputVolume,
+      outputVolume: call.outputVolume || previous.outputVolume,
+    }
     if (typeof call.input === "string") audio.input = call.input
     if (call.output) audio.output = call.output
     this.store(audio)
