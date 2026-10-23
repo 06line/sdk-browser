@@ -71,7 +71,7 @@ export class Phone extends Emitter<PhoneEvents> {
     if (options.autoConnect ?? true) void this.connect().catch((error) => this.emit("error", toPhoneError(error)))
   }
 
-  /** Whether the browser can send the sound to a chosen speaker (it has HTMLMediaElement.setSinkId). */
+  /** Whether the browser can send the sound to a chosen speaker (it has AudioContext.setSinkId: Chrome, Edge). */
   get canChooseOutput(): boolean {
     return this.sound.canChooseOutput
   }

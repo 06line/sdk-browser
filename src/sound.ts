@@ -1,6 +1,8 @@
 import { browserErrors, PhoneError } from "./errors.js"
 
-const canChooseOutput = typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype
+// The speaker is chosen on the AudioContext: an audio element playing a stream of Web Audio accepts setSinkId but Chrome
+// keeps it on the default speaker.
+const canChooseOutput = typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype
 
 /**
  * Sound is the sound of the phone, one call at a time.
@@ -8,8 +10,9 @@ const canChooseOutput = typeof HTMLMediaElement !== "undefined" && "setSinkId" i
  * Sent: microphone → input gain → soft limiter → mute → the one track of the WebRTC session. The track never changes,
  * so switching microphones or muting needs no renegotiation.
  *
- * Received: the track of the session → output gain → an audio element, which can play on a chosen speaker. The raw
+ * Received: the track of the session → output gain → the speaker of the AudioContext, which can be chosen. The raw
  * stream also sits in a silent element: Chrome only feeds a remote WebRTC stream to Web Audio when an element holds it.
+ * The microphone test plays on the same speaker.
  */
 export class Sound {
   readonly canChooseOutput = canChooseOutput
@@ -27,7 +30,6 @@ export class Sound {
   private outputMeter?: AnalyserNode
   private remote?: MediaStreamAudioSourceNode
   private readonly holder = typeof document !== "undefined" ? document.createElement("audio") : undefined
-  private readonly speaker = typeof document !== "undefined" ? document.createElement("audio") : undefined
 
   /** Called when the microphone in use goes away (unplugged, revoked). */
   onMicrophoneLost?: () => void
@@ -84,9 +86,9 @@ export class Sound {
 
   async setOutput(deviceId: string | undefined) {
     if (deviceId === undefined) return
-    if (!this.canChooseOutput || !this.speaker) throw browserErrors.notSupported()
+    if (!this.canChooseOutput) throw browserErrors.notSupported()
 
-    await sink(this.speaker, deviceId)
+    await sink(this.graph().ctx, deviceId)
   }
 
   setOutputVolume(volume: number) {
@@ -99,7 +101,6 @@ export class Sound {
 
     try {
       await ctx.resume()
-      await this.speaker?.play()
     } catch (error) {
       throw playError(error)
     }
@@ -127,8 +128,6 @@ export class Sound {
    */
   async test(options: { input: string | MediaStream; output?: string; inputVolume: number; outputVolume: number }) {
     const ctx = this.graph().ctx
-    const element = document.createElement("audio")
-    const destination = ctx.createMediaStreamDestination()
 
     const gain = ctx.createGain()
     gain.gain.value = clamp(options.inputVolume)
@@ -136,8 +135,7 @@ export class Sound {
     delay.delayTime.value = 1.5
     const volume = ctx.createGain()
     volume.gain.value = clamp(options.outputVolume)
-    gain.connect(limiter(ctx)).connect(delay).connect(volume).connect(destination)
-    element.srcObject = destination.stream
+    gain.connect(limiter(ctx)).connect(delay).connect(volume).connect(ctx.destination)
 
     let input: { stream: MediaStream; source: MediaStreamAudioSourceNode; owned: boolean } | undefined
     const release = () => {
@@ -150,12 +148,9 @@ export class Sound {
       input = { stream, source: ctx.createMediaStreamSource(stream), owned: !(device instanceof MediaStream) }
       input.source.connect(gain)
     }
-    const setOutput = async (deviceId: string) => {
-      if (!this.canChooseOutput) throw browserErrors.notSupported()
-      await sink(element, deviceId)
-    }
+    const setOutput = (deviceId: string) => this.setOutput(deviceId)
     const stop = () => {
-      element.pause()
+      volume.disconnect()
       release()
     }
 
@@ -165,7 +160,6 @@ export class Sound {
 
       try {
         await ctx.resume()
-        await element.play()
       } catch (error) {
         throw playError(error)
       }
@@ -200,10 +194,8 @@ export class Sound {
 
       this.outputGain = ctx.createGain()
       this.outputMeter = ctx.createAnalyser()
-      const playback = ctx.createMediaStreamDestination()
-      this.outputGain.connect(playback)
+      this.outputGain.connect(ctx.destination)
       this.outputGain.connect(this.outputMeter)
-      if (this.speaker) this.speaker.srcObject = playback.stream
     }
 
     return {
@@ -230,10 +222,10 @@ function limiter(ctx: AudioContext): DynamicsCompressorNode {
   return node
 }
 
-// sink sends an element to a speaker, with the speaker errors as PhoneError.
-async function sink(element: HTMLAudioElement, deviceId: string) {
+// sink sends the sound of an AudioContext to a speaker ("" is the system one), with the speaker errors as PhoneError.
+async function sink(ctx: AudioContext, deviceId: string) {
   try {
-    await (element as HTMLAudioElement & { setSinkId(id: string): Promise<void> }).setSinkId(deviceId)
+    await (ctx as AudioContext & { setSinkId(id: string): Promise<void> }).setSinkId(deviceId === "default" ? "" : deviceId)
   } catch (error) {
     const name = (error as DOMException).name
     if (name === "NotFoundError" || name === "NotAllowedError" || name === "AbortError") throw browserErrors.speakerNotFound()
@@ -256,7 +248,9 @@ async function microphone(deviceId: string | undefined): Promise<MediaStream> {
   try {
     return await navigator.mediaDevices.getUserMedia({
       audio: {
-        ...(deviceId && deviceId !== "default" ? { deviceId: { exact: deviceId } } : {}),
+        // Without a deviceId Chrome opens the first microphone it lists, not the system one: ask for "default" (Chrome's
+        // id of the system microphone; other browsers ignore an ideal they do not have).
+        deviceId: deviceId && deviceId !== "default" ? { exact: deviceId } : "default",
         echoCancellation: true,
         noiseSuppression: true,
         // The input gain is the only volume control: the browser's own one would fight it.
