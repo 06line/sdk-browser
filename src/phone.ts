@@ -1,4 +1,4 @@
-import { api } from "./api.js"
+import { api, openStream } from "./api.js"
 import { Call, type CallAudio, type CallHost } from "./call.js"
 import { Emitter } from "./emitter.js"
 import { browserErrors, PhoneError, toPhoneError } from "./errors.js"
@@ -13,7 +13,7 @@ import {
   type MicrophoneTest,
   type PhoneOptions,
   type PhoneState,
-  type SessionEvent,
+  type StreamEvent,
 } from "./types.js"
 
 type PhoneEvents = {
@@ -26,12 +26,17 @@ type PhoneEvents = {
 const storageKey = "06line:audio"
 // A key is refreshed this long before it expires.
 const refreshBefore = 60_000
-// A session that cannot be restored for this long is given up, with connection_lost.
+// A stream that cannot be restored for this long is given up, with connection_lost.
 const giveUpAfter = 120_000
-// A session that answers its offer but never sends session.ready is a failed one.
+// A stream that opens but never sends ready is a failed one.
 const readyWithin = 10_000
+// A hang up that cannot reach 06 Line (it restarts, the network dropped) is sent again for this long.
+const hangupFor = 30_000
 
-/** Phone holds the WebRTC session of the page, its lines, and its calls, one at a time. */
+/**
+ * Phone holds the event stream of the page, its lines, and its calls, one at a time. Each call has its own WebRTC
+ * session, opened when it is placed or answered and closed when it ends.
+ */
 export class Phone extends Emitter<PhoneEvents> {
   state: PhoneState = "closed"
   lines: Line[] = []
@@ -46,8 +51,8 @@ export class Phone extends Emitter<PhoneEvents> {
   }
   private key?: EphemeralKey
   private keyTimer?: ReturnType<typeof setTimeout>
-  private pc?: RTCPeerConnection
-  private sessionId?: string
+  private stream?: AbortController
+  private readonly sessions = new Map<string, RTCPeerConnection>()
   private lostSince?: number
   private retryTimer?: ReturnType<typeof setTimeout>
   private opening?: Promise<void>
@@ -65,7 +70,7 @@ export class Phone extends Emitter<PhoneEvents> {
     // Back online after a network loss: retry now rather than at the end of the wait.
     if (typeof window !== "undefined") {
       window.addEventListener("online", () => {
-        if (this.wanted && this.state === "reconnecting") void this.open().catch(() => this.sessionLost())
+        if (this.wanted && this.state === "reconnecting") void this.open().catch(() => this.streamLost())
       })
     }
 
@@ -77,7 +82,7 @@ export class Phone extends Emitter<PhoneEvents> {
     return this.sound.canChooseOutput
   }
 
-  /** Opens the WebRTC session, and keeps it open until disconnect(). */
+  /** Opens the event stream, and keeps it open until disconnect(). */
   async connect(): Promise<void> {
     this.wanted = true
     if (this.state === "connected") return
@@ -86,12 +91,12 @@ export class Phone extends Emitter<PhoneEvents> {
     try {
       await this.open()
     } catch (error) {
-      this.sessionLost()
+      this.streamLost()
       throw toPhoneError(error)
     }
   }
 
-  /** Closes the session; the call in progress is hung up. */
+  /** Closes the stream; the call in progress is hung up. */
   async disconnect(): Promise<void> {
     this.wanted = false
     this.lostSince = undefined
@@ -102,11 +107,7 @@ export class Phone extends Emitter<PhoneEvents> {
     if (call) await this.hangupCall(call).catch(() => {})
     this.endAll("hangup")
 
-    const id = this.sessionId
-    this.closeSession()
-    if (id && this.key) {
-      await api(this.baseUrl, this.key.ephemeral_key, `/v1/webrtc/sessions/${id}`, undefined, "DELETE").catch(() => {})
-    }
+    this.closeStream()
     this.setState("closed")
   }
 
@@ -154,24 +155,32 @@ export class Phone extends Emitter<PhoneEvents> {
    */
   async call(options: CallOptions): Promise<Call> {
     requireGesture()
-    const sessionId = this.session()
+    this.requireConnected()
     const lineId = this.lineFor(options.lineId)
 
     await this.prepareAudio()
     const audio = await this.openAudio(options)
 
-    let data: ApiCall
+    let data: ApiCall & { sdp?: string }
+    let pc: RTCPeerConnection | undefined
     try {
-      data = await this.request<ApiCall>("/v1/calls", {
+      pc = this.newSession()
+      data = await this.request<ApiCall & { sdp?: string }>("/v1/calls", {
         line_id: lineId,
         to: options.to,
-        session_id: sessionId,
+        sdp: await offer(pc),
         client_ref: options.clientRef,
       })
+      // A client_ref already used returns the first call, whose session is that of the first request.
+      if (!data.sdp) throw new PhoneError("conflict", "this client_ref already placed a call", { param: "clientRef" })
+      await pc.setRemoteDescription({ type: "answer", sdp: data.sdp })
     } catch (error) {
+      pc?.close()
       this.sound.releaseInput()
-      throw error
+      throw toPhoneError(error)
     }
+
+    this.sessions.set(data.id, pc)
 
     return this.track(data, audio)
   }
@@ -180,24 +189,40 @@ export class Phone extends Emitter<PhoneEvents> {
 
   private async answerCall(call: Call, options: AudioOptions): Promise<void> {
     requireGesture()
-    const sessionId = this.session()
+    this.requireConnected()
 
     await this.prepareAudio()
     const audio = await this.openAudio(options)
     call.attach(audio)
     this.remember(call)
 
+    const pc = this.newSession()
     try {
       // The answer resolves with the call still ringing; call.state turns it active.
-      call.update(await this.request<ApiCall>(`/v1/calls/${call.id}/answer`, { session_id: sessionId }))
+      const data = await this.request<ApiCall & { sdp: string }>(`/v1/calls/${call.id}/answer`, { sdp: await offer(pc) })
+      await pc.setRemoteDescription({ type: "answer", sdp: data.sdp })
+      this.sessions.set(call.id, pc)
+      call.update(data)
     } catch (error) {
+      pc.close()
       call.detach()
-      throw error
+      throw toPhoneError(error)
     }
   }
 
+  /** Hangs up, again while 06 Line cannot be reached: it may be restarting, and the call goes on meanwhile. */
   private async hangupCall(call: Call): Promise<void> {
-    call.update(await this.request<ApiCall>(`/v1/calls/${call.id}/hangup`, {}))
+    const until = Date.now() + hangupFor
+    for (let wait = 500; ; wait = Math.min(wait * 2, 5_000)) {
+      try {
+        call.update(await this.request<ApiCall>(`/v1/calls/${call.id}/hangup`, {}))
+
+        return
+      } catch (error) {
+        if (!(error instanceof PhoneError) || error.code !== "internal" || Date.now() > until) throw error
+        await new Promise((resolve) => setTimeout(resolve, wait))
+      }
+    }
   }
 
   // Audio.
@@ -269,6 +294,8 @@ export class Phone extends Emitter<PhoneEvents> {
       const created = new Call(data, this.host, this.sound)
       created.on("ended", () => {
         this.calls = this.calls.filter((c) => c !== created)
+        this.sessions.get(created.id)?.close()
+        this.sessions.delete(created.id)
       })
       this.calls.push(created)
       call = created
@@ -287,10 +314,11 @@ export class Phone extends Emitter<PhoneEvents> {
     for (const call of [...this.calls]) call.end(reason)
   }
 
-  private onEvent(event: SessionEvent) {
+  private onEvent(event: StreamEvent) {
     switch (event.type) {
-      case "session.ready":
+      case "ready":
         this.lines = event.data.lines.map(lineFrom)
+        void this.catchUp(event.data.calls)
         break
       case "line.state": {
         const line = lineFrom(event.data)
@@ -310,12 +338,30 @@ export class Phone extends Emitter<PhoneEvents> {
     }
   }
 
-  // The WebRTC session.
+  /**
+   * After a new stream, from its snapshot: an incoming call that rings now rings here, and a call this phone holds
+   * takes the state it has now. A held call missing from the snapshot ended meanwhile: the API says how.
+   */
+  private async catchUp(live: ApiCall[]) {
+    for (const data of live) {
+      const known = this.calls.some((c) => c.id === data.id)
+      if (known) this.track(data)
+      else if (data.direction === "inbound" && data.state === "ringing") this.emit("incoming", this.track(data))
+    }
 
-  private session(): string {
-    if (this.state !== "connected" || !this.sessionId) throw browserErrors.notConnected()
+    for (const call of this.calls.filter((c) => !live.some((data) => data.id === c.id))) {
+      try {
+        call.update(await this.request<ApiCall>(`/v1/calls/${call.id}`))
+      } catch {
+        call.end("line_offline")
+      }
+    }
+  }
 
-    return this.sessionId
+  // The event stream and the sessions of the calls.
+
+  private requireConnected() {
+    if (this.state !== "connected") throw browserErrors.notConnected()
   }
 
   private lineFor(lineId: string | undefined): string {
@@ -329,13 +375,13 @@ export class Phone extends Emitter<PhoneEvents> {
     )
   }
 
-  /** Opens a session, once at a time: connect(), the retry timer and the online event share it. */
+  /** Opens the stream, once at a time: connect(), the retry timer and the online event share it. */
   private open(): Promise<void> {
     clearTimeout(this.retryTimer)
     this.opening ??= (async () => {
       try {
         await this.refreshKey()
-        await this.openSession()
+        await this.openStream()
       } finally {
         this.opening = undefined
       }
@@ -344,79 +390,59 @@ export class Phone extends Emitter<PhoneEvents> {
     return this.opening
   }
 
-  private async openSession() {
-    this.closeSession()
+  private async openStream() {
+    this.closeStream()
+    const controller = new AbortController()
+    this.stream = controller
 
-    const key = this.key!
-    const pc = new RTCPeerConnection({ iceServers: key.ice_servers })
-    this.pc = pc
-
-    pc.addTransceiver(this.sound.track(), { direction: "sendrecv" })
-    pc.ontrack = (event) => this.sound.setRemote(event.streams[0] ?? new MediaStream([event.track]))
-
-    const channel = pc.createDataChannel("06line")
     const ready = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new PhoneError("internal", "the session never became ready")), readyWithin)
-      channel.onmessage = (message) => {
-        const event = JSON.parse(message.data) as SessionEvent
+      const timer = setTimeout(() => reject(new PhoneError("internal", "the event stream never became ready")), readyWithin)
+      // The stream ends with an error (a network loss, 06 Line restarting) or for good: either way a new one opens.
+      void openStream(this.baseUrl, this.key!.ephemeral_key, controller.signal, (event) => {
         this.onEvent(event)
-        if (event.type === "session.ready") {
+        if (event.type === "ready") {
           clearTimeout(timer)
           resolve()
         }
-      }
+      }).then(
+        () => this.lost(controller),
+        (error) => {
+          clearTimeout(timer)
+          reject(error)
+          this.lost(controller)
+        }
+      )
     })
 
-    // ICE failed, or the data channel closed: the session is gone, a new one opens.
-    const lost = () => {
-      if (pc === this.pc && this.state === "connected") this.sessionLost()
-    }
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") lost()
-    }
-    channel.onclose = lost
-
-    await pc.setLocalDescription(await pc.createOffer())
-    await iceGathered(pc)
-
-    const session = await this.request<{ id: string; sdp: string }>("/v1/webrtc/sessions", { sdp: pc.localDescription!.sdp })
-    this.sessionId = session.id
-    await pc.setRemoteDescription({ type: "answer", sdp: session.sdp })
     await ready
-
-    const reconnected = this.lostSince !== undefined
     this.lostSince = undefined
     this.setState("connected")
-    if (reconnected) await this.syncCalls()
+  }
+
+  private lost(controller: AbortController) {
+    if (controller === this.stream && !controller.signal.aborted && this.state === "connected") this.streamLost()
+  }
+
+  private closeStream() {
+    this.stream?.abort()
+    this.stream = undefined
+  }
+
+  private newSession(): RTCPeerConnection {
+    const pc = new RTCPeerConnection({ iceServers: this.key!.ice_servers })
+    pc.addTransceiver(this.sound.track(), { direction: "sendrecv" })
+    pc.ontrack = (event) => this.sound.setRemote(event.streams[0] ?? new MediaStream([event.track]))
+
+    return pc
   }
 
   /**
-   * After a new session: the API hung up the call of the lost one, and this phone missed its events. The calls take
-   * the state the API has now.
+   * The stream died. The calls go on: their audio does not go through it, and 06 Line hangs up a call whose session
+   * is lost. A new stream opens with a growing wait, and its snapshot catches up; after 2 minutes without one, the
+   * calls are hung up and the phone closes.
    */
-  private async syncCalls() {
-    for (const call of [...this.calls]) {
-      try {
-        call.update(await this.request<ApiCall>(`/v1/calls/${call.id}`))
-      } catch {
-        call.end("line_offline")
-      }
-    }
-  }
-
-  private closeSession() {
-    const pc = this.pc
-    this.pc = undefined
-    this.sessionId = undefined
-    pc?.close()
-  }
-
-  /**
-   * The session died. Its calls stay as they are until a new session tells their real state (the API hangs up a call
-   * whose session is lost); a new one opens with a growing wait, for up to 2 minutes, then the calls end line_offline.
-   */
-  private sessionLost() {
-    this.closeSession()
+  private streamLost() {
+    this.closeStream()
     if (!this.wanted) return
 
     this.lostSince ??= Date.now()
@@ -434,7 +460,7 @@ export class Phone extends Emitter<PhoneEvents> {
     this.setState("reconnecting")
     clearTimeout(this.retryTimer)
     const elapsed = Date.now() - this.lostSince
-    this.retryTimer = setTimeout(() => void this.open().catch(() => this.sessionLost()), Math.min(1000 + elapsed / 4, 10_000))
+    this.retryTimer = setTimeout(() => void this.open().catch(() => this.streamLost()), Math.min(1000 + elapsed / 4, 10_000))
   }
 
   // The ephemeral key.
@@ -510,9 +536,17 @@ export class Phone extends Emitter<PhoneEvents> {
   }
 }
 
-/** Creates the phone of the page: one WebRTC session, one call at a time. */
+/** Creates the phone of the page: one event stream, one call at a time. */
 export function createPhone(options: PhoneOptions): Phone {
   return new Phone(options)
+}
+
+/** The whole offer of a session, with every ICE candidate: 06 Line takes no trickle ICE. */
+async function offer(pc: RTCPeerConnection): Promise<string> {
+  await pc.setLocalDescription(await pc.createOffer())
+  await iceGathered(pc)
+
+  return pc.localDescription!.sdp
 }
 
 function iceGathered(pc: RTCPeerConnection): Promise<void> {

@@ -10,7 +10,8 @@ type CallEvents = {
 }
 
 /**
- * What a call needs from its phone: the REST routes, with the session of the phone, and the memory of the devices.
+ * What a call needs from its phone: the REST routes, with the key and the sessions of the phone, and the memory of the
+ * devices.
  * @internal
  */
 export type CallHost = {
@@ -152,7 +153,7 @@ export class Call extends Emitter<CallEvents> {
   update(data: ApiCall) {
     if (this.endReason) return
 
-    // Every session rings; when another one answers, the call is over for this phone.
+    // Every page rings; when another one answers, the call is over for this phone.
     if (this.direction === "inbound" && data.state === "active" && !this.hasAudio) {
       this.end("answered_elsewhere")
 

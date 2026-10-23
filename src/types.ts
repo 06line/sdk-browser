@@ -6,7 +6,7 @@ export type PhoneState = "connecting" | "connected" | "reconnecting" | "closed"
 
 export type CallState = "dialing" | "ringing" | "active" | "ended"
 
-// answered_elsewhere is the SDK's own: another session of the company answered the incoming call.
+// answered_elsewhere is the SDK's own: another page or server of the company answered the incoming call.
 export type EndReason =
   | "hangup"
   | "remote_hangup"
@@ -67,7 +67,7 @@ export type PhoneOptions = {
   rememberDevices?: boolean
 }
 
-// The API objects pushed on the data channel and returned by the REST routes.
+// The API objects pushed on the event stream and returned by the REST routes.
 export type ApiLine = {
   id: string
   phone_number: string
@@ -93,8 +93,9 @@ export type ApiCall = {
   duration_s?: number
 }
 
-export type SessionEvent =
-  | { type: "session.ready"; data: { lines: ApiLine[] } }
+// The SMS events of the stream never reach an ephemeral key.
+export type StreamEvent =
+  | { type: "ready"; data: { lines: ApiLine[]; calls: ApiCall[] } }
   | { type: "line.state"; data: ApiLine }
   | { type: "call.incoming"; data: ApiCall }
   | { type: "call.state"; data: ApiCall }

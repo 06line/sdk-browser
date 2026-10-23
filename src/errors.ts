@@ -25,7 +25,7 @@ export const browserErrors = {
   notConnected: () => new PhoneError("line_offline", "the phone is not connected: wait for the connected state"),
   ephemeralKeyFailed: (cause: unknown) =>
     new PhoneError("ephemeral_key_failed", `getEphemeralKey failed: ${String(cause)}`),
-  connectionLost: () => new PhoneError("connection_lost", "the WebRTC session could not be restored for 2 minutes"),
+  connectionLost: () => new PhoneError("connection_lost", "the event stream could not be restored for 2 minutes"),
 }
 
 /** toPhoneError keeps a PhoneError, and wraps anything else as internal. */
