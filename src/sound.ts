@@ -121,7 +121,7 @@ export class Sound {
     return { input: peak(inputMeter), output: peak(outputMeter) }
   }
 
-  /** Plays a microphone back 0.5 s later through the same gain and limiter as a call. */
+  /** Plays a microphone back 1.5 s later through the same gain and limiter as a call. */
   async test(options: { input: string | MediaStream; output?: string; inputVolume: number; outputVolume: number }) {
     const ctx = this.graph().ctx
     const stream = options.input instanceof MediaStream ? options.input : await microphone(options.input)
@@ -130,8 +130,8 @@ export class Sound {
 
     const gain = ctx.createGain()
     gain.gain.value = clamp(options.inputVolume)
-    const delay = ctx.createDelay(1)
-    delay.delayTime.value = 0.5
+    const delay = ctx.createDelay(2)
+    delay.delayTime.value = 1.5
     const volume = ctx.createGain()
     volume.gain.value = clamp(options.outputVolume)
 

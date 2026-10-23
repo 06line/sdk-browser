@@ -124,7 +124,7 @@ export class Phone extends Emitter<PhoneEvents> {
     }
   }
 
-  /** Plays the microphone back half a second later; call it from a user action. */
+  /** Plays the microphone back 1.5 s later, so the voice is not drowned by the sound of speaking; call it from a user action. */
   async testMicrophone(options: AudioOptions = {}): Promise<{ stop(): void }> {
     requireGesture()
 
