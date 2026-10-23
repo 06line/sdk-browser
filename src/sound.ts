@@ -121,10 +121,12 @@ export class Sound {
     return { input: peak(inputMeter), output: peak(outputMeter) }
   }
 
-  /** Plays a microphone back 1.5 s later through the same gain and limiter as a call. */
+  /**
+   * Plays a microphone back 1.5 s later through the same gain and limiter as a call. Its devices and volumes change
+   * live, like a call's.
+   */
   async test(options: { input: string | MediaStream; output?: string; inputVolume: number; outputVolume: number }) {
     const ctx = this.graph().ctx
-    const stream = options.input instanceof MediaStream ? options.input : await microphone(options.input)
     const element = document.createElement("audio")
     const destination = ctx.createMediaStreamDestination()
 
@@ -134,22 +136,32 @@ export class Sound {
     delay.delayTime.value = 1.5
     const volume = ctx.createGain()
     volume.gain.value = clamp(options.outputVolume)
-
-    const source = ctx.createMediaStreamSource(stream)
-    source.connect(gain).connect(limiter(ctx)).connect(delay).connect(volume).connect(destination)
+    gain.connect(limiter(ctx)).connect(delay).connect(volume).connect(destination)
     element.srcObject = destination.stream
 
+    let input: { stream: MediaStream; source: MediaStreamAudioSourceNode; owned: boolean } | undefined
+    const release = () => {
+      input?.source.disconnect()
+      if (input?.owned) input.stream.getTracks().forEach((track) => track.stop())
+    }
+    const setInput = async (device: string | MediaStream) => {
+      const stream = device instanceof MediaStream ? device : await microphone(device)
+      release()
+      input = { stream, source: ctx.createMediaStreamSource(stream), owned: !(device instanceof MediaStream) }
+      input.source.connect(gain)
+    }
+    const setOutput = async (deviceId: string) => {
+      if (!this.canChooseOutput) throw browserErrors.notSupported()
+      await sink(element, deviceId)
+    }
     const stop = () => {
       element.pause()
-      source.disconnect()
-      if (!(options.input instanceof MediaStream)) stream.getTracks().forEach((track) => track.stop())
+      release()
     }
 
     try {
-      if (options.output !== undefined) {
-        if (!this.canChooseOutput) throw browserErrors.notSupported()
-        await sink(element, options.output)
-      }
+      await setInput(options.input)
+      if (options.output !== undefined) await setOutput(options.output)
 
       try {
         await ctx.resume()
@@ -163,7 +175,13 @@ export class Sound {
       throw error
     }
 
-    return { stop }
+    return {
+      stop,
+      setInput,
+      setOutput,
+      setInputVolume: (value: number) => void (gain.gain.value = clamp(value)),
+      setOutputVolume: (value: number) => void (volume.gain.value = clamp(value)),
+    }
   }
 
   private graph() {

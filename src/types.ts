@@ -45,6 +45,15 @@ export type AudioOptions = {
   outputVolume?: number
 }
 
+/** The microphone test of phone.testMicrophone(): its devices and volumes change live, like a call's. */
+export type MicrophoneTest = {
+  stop(): void
+  setInput(device: string | MediaStream): Promise<void>
+  setOutput(deviceId: string): Promise<void>
+  setInputVolume(volume: number): void
+  setOutputVolume(volume: number): void
+}
+
 export type CallOptions = AudioOptions & {
   to: string
   lineId?: string

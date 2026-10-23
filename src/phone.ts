@@ -10,6 +10,7 @@ import {
   type EphemeralKey,
   type Line,
   lineFrom,
+  type MicrophoneTest,
   type PhoneOptions,
   type PhoneState,
   type SessionEvent,
@@ -124,12 +125,23 @@ export class Phone extends Emitter<PhoneEvents> {
     }
   }
 
-  /** Plays the microphone back 1.5 s later, so the voice is not drowned by the sound of speaking; call it from a user action. */
-  async testMicrophone(options: AudioOptions = {}): Promise<{ stop(): void }> {
+  /**
+   * Plays the microphone back 1.5 s later, so the voice is not drowned by the sound of speaking; call it from a user
+   * action. Its devices and volumes change live, like a call's.
+   */
+  async testMicrophone(options: AudioOptions = {}): Promise<MicrophoneTest> {
     requireGesture()
 
     try {
-      return await this.withDevices(options, (audio) => this.sound.test(audio))
+      const test = await this.withDevices(options, (audio) => this.sound.test(audio))
+
+      return {
+        stop: test.stop,
+        setInput: (device) => test.setInput(device).catch((error) => Promise.reject(toPhoneError(error))),
+        setOutput: (deviceId) => test.setOutput(deviceId).catch((error) => Promise.reject(toPhoneError(error))),
+        setInputVolume: test.setInputVolume,
+        setOutputVolume: test.setOutputVolume,
+      }
     } catch (error) {
       throw toPhoneError(error)
     }

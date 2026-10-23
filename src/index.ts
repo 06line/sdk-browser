@@ -9,6 +9,7 @@ export type {
   EndReason,
   EphemeralKey,
   Line,
+  MicrophoneTest,
   PhoneOptions,
   PhoneState,
 } from "./types.js"
