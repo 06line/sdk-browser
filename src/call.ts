@@ -1,12 +1,13 @@
 import { Emitter } from "./emitter.js"
 import { toPhoneError } from "./errors.js"
 import { clamp, type Sound } from "./sound.js"
-import type { ApiCall, AudioOptions, CallState, EndReason } from "./types.js"
+import type { ApiCall, AudioOptions, CallState, EndReason, Track } from "./types.js"
 
 type CallEvents = {
   state: (state: CallState) => void
   ended: (reason: EndReason) => void
   level: (levels: { input: number; output: number }) => void
+  transcript: (track: Track, text: string) => void
 }
 
 /**
@@ -48,6 +49,8 @@ export class Call extends Emitter<CallEvents> {
   output: string | null = null
   inputVolume = 1
   outputVolume = 1
+  /** What was said on each track so far, when the account transcribes its calls live. */
+  transcript: Record<Track, string> = { remote: "", local: "" }
 
   private levelTimer?: ReturnType<typeof setInterval>
   // Whether the sound of the phone is this call's: only then does its end release the microphone.
@@ -118,6 +121,15 @@ export class Call extends Emitter<CallEvents> {
   }
 
   /**
+   * Adds the words heard on a track, from call.transcript.
+   * @internal
+   */
+  hear(track: Track, text: string) {
+    this.transcript = { ...this.transcript, [track]: this.transcript[track] + text }
+    this.emit("transcript", track, text)
+  }
+
+  /**
    * Takes the audio the phone opened for this call, before it starts.
    * @internal
    */
@@ -161,6 +173,7 @@ export class Call extends Emitter<CallEvents> {
     }
 
     if (data.answered_at) this.answeredAt = new Date(data.answered_at)
+    if (data.transcript) this.transcript = { remote: "", local: "", ...data.transcript }
 
     if (data.state !== this.state) {
       this.state = data.state

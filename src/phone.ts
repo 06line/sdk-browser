@@ -335,6 +335,9 @@ export class Phone extends Emitter<PhoneEvents> {
         // Only calls this phone knows: a call another session took ends here as answered_elsewhere.
         if (this.calls.some((c) => c.id === event.data.id)) this.track(event.data)
         break
+      case "call.transcript":
+        this.calls.find((c) => c.id === event.data.call_id)?.hear(event.data.track, event.data.text)
+        break
     }
   }
 

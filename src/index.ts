@@ -12,4 +12,5 @@ export type {
   MicrophoneTest,
   PhoneOptions,
   PhoneState,
+  Track,
 } from "./types.js"

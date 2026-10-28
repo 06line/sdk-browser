@@ -91,7 +91,11 @@ export type ApiCall = {
   answered_at?: string
   ended_at?: string
   duration_s?: number
+  transcript?: Partial<Record<Track, string>>
 }
+
+/** A track of a call: remote is the other party, local is you. */
+export type Track = "remote" | "local"
 
 // The SMS events of the stream never reach an ephemeral key.
 export type StreamEvent =
@@ -99,6 +103,7 @@ export type StreamEvent =
   | { type: "line.state"; data: ApiLine }
   | { type: "call.incoming"; data: ApiCall }
   | { type: "call.state"; data: ApiCall }
+  | { type: "call.transcript"; data: { call_id: string; track: Track; text: string } }
 
 export function lineFrom(line: ApiLine): Line {
   return {
