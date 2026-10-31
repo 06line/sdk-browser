@@ -10,6 +10,7 @@ export type {
   EphemeralKey,
   Line,
   MicrophoneTest,
+  MicrophoneTestOptions,
   PhoneOptions,
   PhoneState,
   Track,

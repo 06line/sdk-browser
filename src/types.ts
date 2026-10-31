@@ -45,13 +45,26 @@ export type AudioOptions = {
   outputVolume?: number
 }
 
+export type MicrophoneTestOptions = AudioOptions & {
+  /** Plays the voice as the other party hears it: the telephone band and the G.711 codec of a call. */
+  phoneQuality?: boolean
+}
+
 /** The microphone test of phone.testMicrophone(): its devices and volumes change live, like a call's. */
 export type MicrophoneTest = {
+  readonly input: string | MediaStream
+  readonly output: string | null
+  readonly inputVolume: number
+  readonly outputVolume: number
+  readonly phoneQuality: boolean
   stop(): void
   setInput(device: string | MediaStream): Promise<void>
   setOutput(deviceId: string): Promise<void>
   setInputVolume(volume: number): void
   setOutputVolume(volume: number): void
+  setPhoneQuality(enabled: boolean): void
+  /** Peak levels, 0 to 1, of the microphone and of what plays back. */
+  levels(): { input: number; output: number }
 }
 
 export type CallOptions = AudioOptions & {

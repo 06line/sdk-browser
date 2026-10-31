@@ -11,6 +11,7 @@ import {
   type Line,
   lineFrom,
   type MicrophoneTest,
+  type MicrophoneTestOptions,
   type PhoneOptions,
   type PhoneState,
   type StreamEvent,
@@ -129,21 +130,67 @@ export class Phone extends Emitter<PhoneEvents> {
 
   /**
    * Plays the microphone back 1.5 s later, so the voice is not drowned by the sound of speaking; call it from a user
-   * action. Its devices and volumes change live, like a call's.
+   * action. Its devices and volumes change live, like a call's, and are remembered for the next calls.
    */
-  async testMicrophone(options: AudioOptions = {}): Promise<MicrophoneTest> {
+  async testMicrophone(options: MicrophoneTestOptions = {}): Promise<MicrophoneTest> {
     requireGesture()
 
     try {
-      const test = await this.withDevices(options, (audio) => this.sound.test(audio))
+      return await this.withDevices(options, async (audio) => {
+        const sound = await this.sound.test({ ...audio, phoneQuality: options.phoneQuality ?? false })
+        const state = {
+          input: audio.input,
+          output: audio.output ?? (this.canChooseOutput ? "default" : null),
+          inputVolume: audio.inputVolume,
+          outputVolume: audio.outputVolume,
+          phoneQuality: options.phoneQuality ?? false,
+        }
+        const test: MicrophoneTest = {
+          get input() {
+            return state.input
+          },
+          get output() {
+            return state.output
+          },
+          get inputVolume() {
+            return state.inputVolume
+          },
+          get outputVolume() {
+            return state.outputVolume
+          },
+          get phoneQuality() {
+            return state.phoneQuality
+          },
+          stop: sound.stop,
+          levels: sound.levels,
+          setInput: async (device) => {
+            await sound.setInput(device).catch((error) => Promise.reject(toPhoneError(error)))
+            state.input = device
+            this.remember(test)
+          },
+          setOutput: async (deviceId) => {
+            await sound.setOutput(deviceId).catch((error) => Promise.reject(toPhoneError(error)))
+            state.output = deviceId
+            this.remember(test)
+          },
+          setInputVolume: (volume) => {
+            state.inputVolume = clamp(volume)
+            sound.setInputVolume(volume)
+            this.remember(test)
+          },
+          setOutputVolume: (volume) => {
+            state.outputVolume = clamp(volume)
+            sound.setOutputVolume(volume)
+            this.remember(test)
+          },
+          setPhoneQuality: (enabled) => {
+            state.phoneQuality = enabled
+            sound.setPhoneQuality(enabled)
+          },
+        }
 
-      return {
-        stop: test.stop,
-        setInput: (device) => test.setInput(device).catch((error) => Promise.reject(toPhoneError(error))),
-        setOutput: (deviceId) => test.setOutput(deviceId).catch((error) => Promise.reject(toPhoneError(error))),
-        setInputVolume: test.setInputVolume,
-        setOutputVolume: test.setOutputVolume,
-      }
+        return test
+      })
     } catch (error) {
       throw toPhoneError(error)
     }
@@ -509,10 +556,10 @@ export class Phone extends Emitter<PhoneEvents> {
   }
 
   /**
-   * Keeps the devices and volumes of a call for the next ones, when it starts and on each change. A volume of 0 is a way
-   * to silence a call, not a level: the previous one stays, so the next call is not silent.
+   * Keeps the devices and volumes of a call or a microphone test for the next calls, on each change. A volume of 0 is a
+   * way to silence a call, not a level: the previous one stays, so the next call is not silent.
    */
-  private remember(call: Call) {
+  private remember(call: Pick<Call, "input" | "output" | "inputVolume" | "outputVolume">) {
     if (this.options.rememberDevices === false) return
 
     const previous = this.remembered()

@@ -123,19 +123,39 @@ export class Sound {
   }
 
   /**
-   * Plays a microphone back 1.5 s later through the same gain and limiter as a call. Its devices and volumes change
-   * live, like a call's.
+   * Plays a microphone back 1.5 s later through the same gain and limiter as a call, in the telephone band and G.711
+   * when phoneQuality is on. Its devices, volumes and quality change live.
    */
-  async test(options: { input: string | MediaStream; output?: string; inputVolume: number; outputVolume: number }) {
+  async test(options: {
+    input: string | MediaStream
+    output?: string
+    inputVolume: number
+    outputVolume: number
+    phoneQuality: boolean
+  }) {
     const ctx = this.graph().ctx
 
     const gain = ctx.createGain()
     gain.gain.value = clamp(options.inputVolume)
+    const limited = limiter(ctx)
+    const line = telephoneLine(ctx)
     const delay = ctx.createDelay(2)
     delay.delayTime.value = 1.5
     const volume = ctx.createGain()
     volume.gain.value = clamp(options.outputVolume)
-    gain.connect(limiter(ctx)).connect(delay).connect(volume).connect(ctx.destination)
+    const inputMeter = ctx.createAnalyser()
+    const outputMeter = ctx.createAnalyser()
+    gain.connect(limited).connect(inputMeter)
+    line.output.connect(delay)
+    delay.connect(volume).connect(ctx.destination)
+    volume.connect(outputMeter)
+
+    const setPhoneQuality = (enabled: boolean) => {
+      limited.disconnect()
+      limited.connect(inputMeter)
+      limited.connect(enabled ? line.input : delay)
+    }
+    setPhoneQuality(options.phoneQuality)
 
     let input: { stream: MediaStream; source: MediaStreamAudioSourceNode; owned: boolean } | undefined
     const release = () => {
@@ -175,6 +195,8 @@ export class Sound {
       setOutput,
       setInputVolume: (value: number) => void (gain.gain.value = clamp(value)),
       setOutputVolume: (value: number) => void (volume.gain.value = clamp(value)),
+      setPhoneQuality,
+      levels: () => ({ input: peak(inputMeter), output: peak(outputMeter) }),
     }
   }
 
@@ -220,6 +242,50 @@ function limiter(ctx: AudioContext): DynamicsCompressorNode {
   node.release.value = 0.1
 
   return node
+}
+
+/**
+ * telephoneLine is what a call does to a voice on its way: resampled to 8 kHz (nothing above 4 kHz goes through) and
+ * coded in G.711 µ-law, 8 bits a sample. The quantization is a staircase curve; filtered again after it, as the 8 kHz
+ * decoder would, its noise stays in the telephone band. The network of the other party (a mobile one) can only lose more.
+ */
+function telephoneLine(ctx: AudioContext): { input: AudioNode; output: AudioNode } {
+  const band = () => {
+    const first = ctx.createBiquadFilter()
+    const second = ctx.createBiquadFilter()
+    for (const filter of [first, second]) {
+      filter.type = "lowpass"
+      filter.frequency.value = 3600
+      filter.Q.value = Math.SQRT1_2
+    }
+    first.connect(second)
+
+    return { input: first, output: second }
+  }
+  const before = band()
+  const after = band()
+  const codec = ctx.createWaveShaper()
+  codec.curve = muLawCurve()
+  before.output.connect(codec).connect(after.input)
+
+  return { input: before.input, output: after.output }
+}
+
+// muLawCurve maps each 16-bit sample to the one it comes back as through a G.711 µ-law encoder and decoder.
+function muLawCurve(): Float32Array<ArrayBuffer> {
+  const curve = new Float32Array(65536)
+  for (let i = 0; i < curve.length; i++) {
+    const sample = i - 32768
+    const sign = sample < 0 ? 0x80 : 0
+    const biased = Math.min(Math.abs(sample), 32635) + 0x84
+    let exponent = 7
+    while (exponent > 0 && (biased & (0x4000 >> (7 - exponent))) === 0) exponent--
+    const mantissa = (biased >> (exponent + 3)) & 0x0f
+    const magnitude = (((mantissa << 3) + 0x84) << exponent) - 0x84
+    curve[i] = (sign ? -magnitude : magnitude) / 32768
+  }
+
+  return curve
 }
 
 // sink sends the sound of an AudioContext to a speaker ("" is the system one), with the speaker errors as PhoneError.
