@@ -1,13 +1,14 @@
 import { Emitter } from "./emitter.js"
 import { toPhoneError } from "./errors.js"
 import { clamp, type Sound } from "./sound.js"
-import type { ApiCall, AudioOptions, CallState, EndReason, Track } from "./types.js"
+import type { ApiCall, AudioOptions, CallState, EndReason, Enrichment, Track } from "./types.js"
 
 type CallEvents = {
   state: (state: CallState) => void
   ended: (reason: EndReason) => void
   level: (levels: { input: number; output: number }) => void
   transcript: (track: Track, text: string) => void
+  enrichment: (enrichment: Enrichment) => void
   audio: () => void
 }
 
@@ -52,6 +53,8 @@ export class Call extends Emitter<CallEvents> {
   outputVolume = 1
   /** What was said on each track so far, when the account transcribes its calls live. */
   transcript: Record<Track, string> = { remote: "", local: "" }
+  /** What the call taught the records so far, in the order it was learned, when the company enriches them. */
+  enrichments: Enrichment[] = []
 
   private levelTimer?: ReturnType<typeof setInterval>
   // Whether the sound of the phone is this call's: only then does its end release the microphone.
@@ -133,6 +136,18 @@ export class Call extends Emitter<CallEvents> {
   hear(track: Track, text: string) {
     this.transcript = { ...this.transcript, [track]: this.transcript[track] + text }
     this.emit("transcript", track, text)
+  }
+
+  /**
+   * Adds or updates what the call taught, from call.enrichment.
+   * @internal
+   */
+  learn(enrichment: Enrichment) {
+    const known = this.enrichments.some((e) => e.id === enrichment.id)
+    this.enrichments = known
+      ? this.enrichments.map((e) => (e.id === enrichment.id ? enrichment : e))
+      : [...this.enrichments, enrichment]
+    this.emit("enrichment", enrichment)
   }
 
   /**

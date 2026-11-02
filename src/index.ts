@@ -7,6 +7,7 @@ export type {
   CallOptions,
   CallState,
   EndReason,
+  Enrichment,
   EphemeralKey,
   Line,
   MicrophoneTest,

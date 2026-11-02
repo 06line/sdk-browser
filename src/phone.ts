@@ -9,6 +9,7 @@ import {
   type CallOptions,
   type EphemeralKey,
   type Line,
+  enrichmentFrom,
   lineFrom,
   type MicrophoneTest,
   type MicrophoneTestOptions,
@@ -384,6 +385,9 @@ export class Phone extends Emitter<PhoneEvents> {
         break
       case "call.transcript":
         this.calls.find((c) => c.id === event.data.call_id)?.hear(event.data.track, event.data.text)
+        break
+      case "call.enrichment":
+        this.calls.find((c) => c.id === event.data.call_id)?.learn(enrichmentFrom(event.data))
         break
     }
   }

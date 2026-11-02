@@ -107,6 +107,56 @@ export type ApiCall = {
   transcript?: Partial<Record<Track, string>>
 }
 
+/**
+ * A change to an attribute of a record, learned from what was said on a call: applied to the record, or suggested for
+ * someone to accept, as the company chose. `recordId` is null while the record is still to make, `newRecord` naming
+ * it; `value` is one item of a list attribute; `quote` the words that say it.
+ */
+export type Enrichment = {
+  id: string
+  callId: string
+  object: string
+  attribute: string
+  recordId: string | null
+  newRecord?: string
+  /** The name of the record, or of the record to make. */
+  recordTitle: string
+  value: unknown
+  previous: unknown
+  quote: string
+  status: "applied" | "suggested" | "dismissed"
+}
+
+export type ApiEnrichment = {
+  id: string
+  call_id: string
+  object: string
+  attribute: string
+  record_id: string | null
+  new_record?: string
+  record_title: string
+  value: unknown
+  previous: unknown
+  quote: string
+  status: Enrichment["status"]
+}
+
+export function enrichmentFrom(data: ApiEnrichment): Enrichment {
+  return {
+    id: data.id,
+    callId: data.call_id,
+    object: data.object,
+    attribute: data.attribute,
+    recordId: data.record_id,
+    newRecord: data.new_record,
+    recordTitle: data.record_title,
+    value: data.value,
+    previous: data.previous,
+    quote: data.quote,
+    status: data.status,
+  }
+}
+
 /** A track of a call: remote is the other party, local is you. */
 export type Track = "remote" | "local"
 
@@ -117,6 +167,7 @@ export type StreamEvent =
   | { type: "call.incoming"; data: ApiCall }
   | { type: "call.state"; data: ApiCall }
   | { type: "call.transcript"; data: { call_id: string; track: Track; text: string } }
+  | { type: "call.enrichment"; data: ApiEnrichment }
 
 export function lineFrom(line: ApiLine): Line {
   return {
