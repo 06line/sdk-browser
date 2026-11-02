@@ -8,6 +8,7 @@ type CallEvents = {
   ended: (reason: EndReason) => void
   level: (levels: { input: number; output: number }) => void
   transcript: (track: Track, text: string) => void
+  audio: () => void
 }
 
 /**
@@ -84,6 +85,7 @@ export class Call extends Emitter<CallEvents> {
   mute(muted = true) {
     this.muted = muted
     this.sound.mute(muted)
+    this.emit("audio")
   }
 
   async setInput(device: string | MediaStream) {
@@ -95,6 +97,7 @@ export class Call extends Emitter<CallEvents> {
 
     this.input = device
     this.host.remember(this)
+    this.emit("audio")
   }
 
   async setOutput(deviceId: string) {
@@ -106,18 +109,21 @@ export class Call extends Emitter<CallEvents> {
 
     this.output = deviceId
     this.host.remember(this)
+    this.emit("audio")
   }
 
   setInputVolume(volume: number) {
     this.inputVolume = clamp(volume)
     this.sound.setInputVolume(volume)
     this.host.remember(this)
+    this.emit("audio")
   }
 
   setOutputVolume(volume: number) {
     this.outputVolume = clamp(volume)
     this.sound.setOutputVolume(volume)
     this.host.remember(this)
+    this.emit("audio")
   }
 
   /**
@@ -143,6 +149,7 @@ export class Call extends Emitter<CallEvents> {
     this.outputVolume = audio.outputVolume
     this.muted = false
     this.levelTimer ??= setInterval(() => this.emit("level", this.sound.levels()), 50)
+    this.emit("audio")
   }
 
   /**
