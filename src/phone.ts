@@ -84,6 +84,35 @@ export class Phone extends Emitter<PhoneEvents> {
     return this.sound.canChooseOutput
   }
 
+  /**
+   * The devices and volumes the next calls and microphone tests start with: the last ones chosen, in a call, a test or
+   * with setAudio(). What was never chosen is missing: the system default device, a volume of 1. Empty with
+   * rememberDevices set to false.
+   */
+  get audio(): AudioOptions {
+    return this.remembered()
+  }
+
+  /**
+   * Chooses the devices and volumes of the next calls, without a call or a test: a microphone and a speaker by their
+   * deviceId from devices() (undefined for the system default), volumes from 0 to 2. What is not given stays. A call or a
+   * microphone test in progress keeps its own: change those with their own setters. Does nothing with rememberDevices
+   * set to false.
+   */
+  setAudio(audio: { input?: string; output?: string; inputVolume?: number; outputVolume?: number }): void {
+    if (this.options.rememberDevices === false) return
+
+    const next: AudioOptions = { ...this.remembered() }
+    for (const side of ["input", "output"] as const) {
+      if (!(side in audio)) continue
+      if (audio[side]) next[side] = audio[side]
+      else delete next[side]
+    }
+    if (audio.inputVolume !== undefined) next.inputVolume = clamp(audio.inputVolume)
+    if (audio.outputVolume !== undefined) next.outputVolume = clamp(audio.outputVolume)
+    this.store(next)
+  }
+
   /** Opens the event stream, and keeps it open until disconnect(). */
   async connect(): Promise<void> {
     this.wanted = true
