@@ -7,9 +7,9 @@ const canChooseOutput = typeof AudioContext !== "undefined" && "setSinkId" in Au
 /**
  * Sound is the sound of the phone, one call at a time.
  *
- * Sent: microphone → input gain → soft limiter → mute → line level → the one track of the WebRTC session. The track
- * never changes, so switching microphones or muting needs no renegotiation. The meter reads before the line level, so
- * a loud voice still fills it.
+ * Sent: microphone → input gain → mute → the one track of the WebRTC session. The track never changes, so switching
+ * microphones or muting needs no renegotiation. Nothing here limits the voice: 06 Line brings it to the level a
+ * mobile line takes on its side, whatever the client.
  *
  * Received: the track of the session → output gain → the speaker of the AudioContext, which can be chosen. The raw
  * stream also sits in a silent element: Chrome only feeds a remote WebRTC stream to Web Audio when an element holds it.
@@ -124,8 +124,8 @@ export class Sound {
   }
 
   /**
-   * Plays a microphone back 1.5 s later through the same gain, limiter and line level as a call, in the telephone band
-   * and G.711 when phoneQuality is on. Its devices, volumes and quality change live.
+   * Plays a microphone back 1.5 s later through the same gain as a call, in the telephone band and G.711 when
+   * phoneQuality is on. Its devices, volumes and quality change live.
    */
   async test(options: {
     input: string | MediaStream
@@ -138,8 +138,6 @@ export class Sound {
 
     const gain = ctx.createGain()
     gain.gain.value = clamp(options.inputVolume)
-    const limited = limiter(ctx)
-    const level = lineLevel(ctx)
     const line = telephoneLine(ctx)
     const delay = ctx.createDelay(2)
     delay.delayTime.value = 1.5
@@ -147,15 +145,14 @@ export class Sound {
     volume.gain.value = clamp(options.outputVolume)
     const inputMeter = ctx.createAnalyser()
     const outputMeter = ctx.createAnalyser()
-    gain.connect(limited).connect(inputMeter)
-    limited.connect(level)
     line.output.connect(delay)
     delay.connect(volume).connect(ctx.destination)
     volume.connect(outputMeter)
 
     const setPhoneQuality = (enabled: boolean) => {
-      level.disconnect()
-      level.connect(enabled ? line.input : delay)
+      gain.disconnect()
+      gain.connect(inputMeter)
+      gain.connect(enabled ? line.input : delay)
     }
     setPhoneQuality(options.phoneQuality)
 
@@ -212,8 +209,8 @@ export class Sound {
       this.inputGain = ctx.createGain()
       this.muteGain = ctx.createGain()
       this.inputMeter = ctx.createAnalyser()
-      this.inputGain.connect(limiter(ctx)).connect(this.muteGain)
-      this.muteGain.connect(lineLevel(ctx)).connect(this.sent)
+      this.inputGain.connect(this.muteGain)
+      this.muteGain.connect(this.sent)
       this.muteGain.connect(this.inputMeter)
 
       this.outputGain = ctx.createGain()
@@ -232,30 +229,6 @@ export class Sound {
       outputMeter: this.outputMeter!,
     }
   }
-}
-
-// The soft limiter rounds the peaks of a loud microphone instead of letting the G.711 codec clip them.
-function limiter(ctx: AudioContext): DynamicsCompressorNode {
-  const node = ctx.createDynamicsCompressor()
-  node.threshold.value = -6
-  node.knee.value = 6
-  node.ratio.value = 12
-  node.attack.value = 0.003
-  node.release.value = 0.1
-
-  return node
-}
-
-/**
- * lineLevel brings what the limiter lets through (peaks near -2 dBFS, its makeup gain included) down to peaks near
- * -10 dBFS. Heard blind on a mobile through the EC25, voices peaking at -10 dBFS sounded best; at -6 and above,
- * saturated: the mobile network has less headroom than G.711.
- */
-function lineLevel(ctx: AudioContext): GainNode {
-  const node = ctx.createGain()
-  node.gain.value = 10 ** (-8 / 20)
-
-  return node
 }
 
 /**
