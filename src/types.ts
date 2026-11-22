@@ -105,6 +105,23 @@ export type ApiCall = {
   ended_at?: string
   duration_s?: number
   transcript?: Partial<Record<Track, string>>
+  voice?: { hd?: boolean; announced_hd?: boolean; network?: CallVoice["network"]; codec?: string; bitrate?: number; signal?: number }
+}
+
+/**
+ * How a call sounds, on a mobile line. `hd` is measured on the voice of the other party, once a few seconds of it were
+ * heard: true when it comes in HD (up to 7 kHz), false when it comes as a narrowband call. `announcedHd` is what the
+ * mobile network names the call, which is not always what comes. `network` is what carries the call on the side of
+ * the line, `codec` and `bitrate` (kbit/s) what the network gave it, `signal` the signal of the line from 0 to 31. A
+ * field that is not known is absent.
+ */
+export type CallVoice = {
+  hd?: boolean
+  announcedHd?: boolean
+  network?: "2g" | "3g" | "4g" | "5g" | "wifi"
+  codec?: string
+  bitrate?: number
+  signal?: number
 }
 
 /**

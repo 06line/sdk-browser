@@ -1,7 +1,7 @@
 import { Emitter } from "./emitter.js"
 import { toPhoneError } from "./errors.js"
 import { clamp, type Sound } from "./sound.js"
-import type { ApiCall, AudioOptions, CallState, EndReason, Enrichment, Track } from "./types.js"
+import type { ApiCall, AudioOptions, CallState, CallVoice, EndReason, Enrichment, Track } from "./types.js"
 
 type CallEvents = {
   state: (state: CallState) => void
@@ -9,6 +9,7 @@ type CallEvents = {
   level: (levels: { input: number; output: number }) => void
   transcript: (track: Track, text: string) => void
   enrichment: (enrichment: Enrichment) => void
+  voice: (voice: CallVoice) => void
   audio: () => void
 }
 
@@ -55,6 +56,8 @@ export class Call extends Emitter<CallEvents> {
   transcript: Record<Track, string> = { remote: "", local: "" }
   /** What the call taught the records so far, in the order it was learned, when the company enriches them. */
   enrichments: Enrichment[] = []
+  /** How the call sounds so far, on a mobile line: null until something is known of it. */
+  voice: CallVoice | null = null
 
   private levelTimer?: ReturnType<typeof setInterval>
   // Whether the sound of the phone is this call's: only then does its end release the microphone.
@@ -196,6 +199,15 @@ export class Call extends Emitter<CallEvents> {
 
     if (data.answered_at) this.answeredAt = new Date(data.answered_at)
     if (data.transcript) this.transcript = { remote: "", local: "", ...data.transcript }
+
+    if (data.voice) {
+      const { announced_hd: announcedHd, ...rest } = data.voice
+      const voice: CallVoice = announcedHd === undefined ? rest : { ...rest, announcedHd }
+      if (JSON.stringify(voice) !== JSON.stringify(this.voice)) {
+        this.voice = voice
+        this.emit("voice", voice)
+      }
+    }
 
     if (data.state !== this.state) {
       this.state = data.state

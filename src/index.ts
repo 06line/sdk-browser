@@ -6,6 +6,7 @@ export type {
   AudioOptions,
   CallOptions,
   CallState,
+  CallVoice,
   EndReason,
   Enrichment,
   EphemeralKey,
